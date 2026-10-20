@@ -1,5 +1,6 @@
 package com.animekivi.livetranslate
 
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,10 +10,10 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -43,7 +44,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -162,9 +162,9 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
             }
 
             val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection!!)
-                .addMatchingUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                .addMatchingUsage(android.media.AudioAttributes.USAGE_GAME)
-                .addMatchingUsage(android.media.AudioAttributes.USAGE_UNKNOWN)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
                 .build()
 
             val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
@@ -201,7 +201,7 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
 
     private suspend fun captureAndRecognize() {
         val buffer = ByteArray(4096)
-        val audioBuffer = ByteArrayOutputStream()
+        val audioBuffer = java.io.ByteArrayOutputStream()
         var silenceCount = 0
         val silenceThreshold = 500
         val minAudioSize = 16000
@@ -302,16 +302,16 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-        private fun startForegroundCompat() {
+    private fun startForegroundCompat() {
         createNotificationChannel()
         val notification = buildNotification("Идёт перевод эфира")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-                        if (captureMode) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
-            )
+            val serviceType = if (captureMode) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            }
+            startForeground(NOTIFICATION_ID, notification, serviceType)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
