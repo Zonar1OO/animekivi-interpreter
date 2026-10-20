@@ -4,10 +4,17 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.media.AudioFormat
+import android.media.AudioPlaybackCaptureConfiguration
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -18,6 +25,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.util.Base64
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.TextView
@@ -26,6 +34,19 @@ import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 
 class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
@@ -36,16 +57,25 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
         const val EXTRA_LANGUAGE = "extra_language"
         const val EXTRA_VOICE = "extra_voice"
         const val EXTRA_OVERLAY = "extra_overlay"
+        const val EXTRA_CAPTURE_MODE = "extra_capture_mode"
+        const val EXTRA_PROJECTION_DATA = "extra_projection_data"
+        const val EXTRA_API_KEY = "extra_api_key"
         private const val CHANNEL_ID = "live_translate_channel"
         private const val NOTIFICATION_ID = 1001
+        private const val SAMPLE_RATE = 16000
+        private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
+        private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
     }
 
     private val handler = Handler(Looper.getMainLooper())
+    private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
 
     private var listening = false
     private var voiceEnabled = true
     private var overlayEnabled = false
     private var selectedLanguage = "auto"
+    private var captureMode = false
+    private var apiKey: String? = null
 
     private var recognizer: SpeechRecognizer? = null
     private var translator: Translator? = null
@@ -57,6 +87,10 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
 
     private var windowManager: WindowManager? = null
     private var captionView: TextView? = null
+
+    private var mediaProjection: MediaProjection? = null
+    private var audioRecord: AudioRecord? = null
+    private var captureJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -84,12 +118,19 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
         selectedLanguage = intent.getStringExtra(EXTRA_LANGUAGE) ?: "auto"
         voiceEnabled = intent.getBooleanExtra(EXTRA_VOICE, true)
         overlayEnabled = intent.getBooleanExtra(EXTRA_OVERLAY, false)
+        captureMode = intent.getBooleanExtra(EXTRA_CAPTURE_MODE, false)
+        apiKey = intent.getStringExtra(EXTRA_API_KEY)
+
+        val projectionData = if (captureMode) {
+            intent.getParcelableExtra<Intent>(EXTRA_PROJECTION_DATA)
+        } else null
 
         listening = false
         handler.removeCallbacksAndMessages(null)
         recognizer?.cancel()
         recognizer?.destroy()
         recognizer = null
+        captureJob?.cancel()
 
         startForegroundCompat()
         updateNotification("Идёт перевод эфира")
@@ -97,17 +138,179 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
         if (overlayEnabled) showOverlay() else hideOverlay()
 
         listening = true
+
+        if (captureMode && projectionData != null && apiKey != null) {
+            startCaptureMode(projectionData)
+        } else {
+            startMicrophoneMode()
+        }
+    }
+
+    private fun startMicrophoneMode() {
         listenOnce()
     }
 
-    private fun startForegroundCompat() {
+    private fun startCaptureMode(projectionData: Intent) {
+        try {
+            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = projectionManager.getMediaProjection(Activity.RESULT_OK, projectionData)
+
+            if (mediaProjection == null) {
+                updateCaption("Не удалось получить MediaProjection. Использую микрофон.")
+                startMicrophoneMode()
+                return
+            }
+
+            val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection!!)
+                .addMatchingUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(android.media.AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(android.media.AudioAttributes.USAGE_UNKNOWN)
+                .build()
+
+            val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                audioRecord = AudioRecord.Builder()
+                    .setAudioPlaybackCaptureConfig(config)
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AUDIO_FORMAT)
+                            .setSampleRate(SAMPLE_RATE)
+                            .setChannelMask(CHANNEL_CONFIG)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(bufferSize * 2)
+                    .build()
+            } else {
+                updateCaption("Захват звука требует Android 10+. Использую микрофон.")
+                startMicrophoneMode()
+                return
+            }
+
+            audioRecord?.startRecording()
+            updateCaption("Захватываю внутренний звук…")
+
+            captureJob = serviceScope.launch {
+                captureAndRecognize()
+            }
+        } catch (e: Exception) {
+            updateCaption("Ошибка захвата: ${e.message}. Использую микрофон.")
+            startMicrophoneMode()
+        }
+    }
+
+    private suspend fun captureAndRecognize() {
+        val buffer = ByteArray(4096)
+        val audioBuffer = ByteArrayOutputStream()
+        var silenceCount = 0
+        val silenceThreshold = 500
+        val minAudioSize = 16000
+
+        while (isActive && listening) {
+            val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+            if (read > 0) {
+                audioBuffer.write(buffer, 0, read)
+
+                val maxAmplitude = calculateMaxAmplitude(buffer, read)
+                if (maxAmplitude < silenceThreshold) {
+                    silenceCount++
+                } else {
+                    silenceCount = 0
+                }
+
+                if (audioBuffer.size() >= minAudioSize && silenceCount > 10) {
+                    val audioData = audioBuffer.toByteArray()
+                    audioBuffer.reset()
+                    silenceCount = 0
+
+                    if (audioData.isNotEmpty()) {
+                        recognizeAudio(audioData)
+                    }
+                }
+            }
+            delay(100)
+        }
+    }
+
+    private fun calculateMaxAmplitude(buffer: ByteArray, size: Int): Int {
+        var max = 0
+        for (i in 0 until size step 2) {
+            if (i + 1 < size) {
+                val sample = (buffer[i].toInt() and 0xFF) or (buffer[i + 1].toInt() shl 8)
+                val amplitude = Math.abs(sample)
+                if (amplitude > max) max = amplitude
+            }
+        }
+        return max
+    }
+
+    private suspend fun recognizeAudio(audioData: ByteArray) {
+        try {
+            val base64Audio = Base64.encodeToString(audioData, Base64.NO_WRAP)
+            val json = JSONObject().apply {
+                put("config", JSONObject().apply {
+                    put("encoding", "LINEAR16")
+                    put("sampleRateHertz", SAMPLE_RATE)
+                    put("languageCode", if (selectedLanguage == "auto") "en-US" else Locale(selectedLanguage).toLanguageTag())
+                    put("enableAutomaticPunctuation", true)
+                })
+                put("audio", JSONObject().apply {
+                    put("content", base64Audio)
+                })
+            }
+
+            val result = withContext(Dispatchers.IO) {
+                val url = URL("https://speech.googleapis.com/v1/speech:recognize?key=$apiKey")
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+
+                OutputStreamWriter(connection.outputStream).use {
+                    it.write(json.toString())
+                    it.flush()
+                }
+
+                val responseCode = connection.responseCode
+                if (responseCode == 200) {
+                    connection.inputStream.bufferedReader().use { it.readText() }
+                } else {
+                    null
+                }
+            }
+
+            if (result != null) {
+                val jsonResponse = JSONObject(result)
+                val results = jsonResponse.optJSONArray("results")
+                if (results != null && results.length() > 0) {
+                    val firstResult = results.getJSONObject(0)
+                    val alternatives = firstResult.getJSONArray("alternatives")
+                    if (alternatives.length() > 0) {
+                        val transcript = alternatives.getJSONObject(0).getString("transcript")
+                        if (transcript.isNotBlank()) {
+                            withContext(Dispatchers.Main) {
+                                translateRecognizedText(transcript)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) {
+                updateCaption("Ошибка распознавания: ${e.message}")
+            }
+        }
+    }
+
+        private fun startForegroundCompat() {
         createNotificationChannel()
         val notification = buildNotification("Идёт перевод эфира")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                        if (captureMode) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)
@@ -370,6 +573,7 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
     private fun stopEverything() {
         listening = false
         handler.removeCallbacksAndMessages(null)
+        captureJob?.cancel()
 
         recognizer?.cancel()
         recognizer?.destroy()
@@ -379,10 +583,20 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
         translator = null
         activeTranslatorSource = null
 
+        try {
+            audioRecord?.stop()
+            audioRecord?.release()
+        } catch (_: Exception) {}
+        audioRecord = null
+
+        mediaProjection?.stop()
+        mediaProjection = null
+
         hideOverlay()
     }
 
     override fun onDestroy() {
+        serviceScope.cancel()
         stopEverything()
         if (ttsReady) {
             tts.shutdown()
