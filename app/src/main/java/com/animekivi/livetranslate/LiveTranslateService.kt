@@ -307,10 +307,7 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun handleTranslation(text: String, sourceCode: String?) {
-        if (sourceCode == null ||
-            sourceCode == TranslateLanguage.RUSSIAN ||
-            sourceCode == TranslateLanguage.UNDETERMINED
-        ) {
+        if (sourceCode == null || sourceCode == TranslateLanguage.RUSSIAN) {
             if (sourceCode == TranslateLanguage.RUSSIAN) {
                 updateCaption("Уже на русском: $text")
             }
