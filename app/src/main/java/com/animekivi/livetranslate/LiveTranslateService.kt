@@ -40,6 +40,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -123,7 +124,12 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
         apiKey = intent.getStringExtra(EXTRA_API_KEY)
 
         val projectionData = if (captureMode) {
-            intent.getParcelableExtra<Intent>(EXTRA_PROJECTION_DATA)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(EXTRA_PROJECTION_DATA, Intent::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra<Intent>(EXTRA_PROJECTION_DATA)
+            }
         } else null
 
         listening = false
@@ -437,11 +443,8 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
             }
 
             override fun onBeginningOfSpeech() {}
-
             override fun onRmsChanged(rmsdB: Float) {}
-
             override fun onBufferReceived(buffer: ByteArray?) {}
-
             override fun onEndOfSpeech() {}
 
             override fun onError(error: Int) {
