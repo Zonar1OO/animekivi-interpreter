@@ -1,0 +1,312 @@
+файл: gradle.properties
+код:
+
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+android.useAndroidX=true
+kotlin.code.style=official
+
+файл: build.gradle.kts
+код:
+
+plugins {
+    id("com.android.application") version "8.7.3" apply false
+    id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+}
+
+файл: settings.gradle.kts
+код:
+
+pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+rootProject.name = "ПереводчикKivi"
+include(":app")
+
+файл: build.gradle.kts
+код:
+
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+android {
+    namespace = "com.animekivi.livetranslate"
+    compileSdk = 35
+    defaultConfig {
+        applicationId = "com.animekivi.livetranslate"
+        minSdk = 26
+        targetSdk = 35
+        versionCode = 2
+        versionName = "0.4"
+    }
+}
+dependencies {
+    implementation("com.google.mlkit:translate:17.0.3")
+    implementation("com.google.mlkit:language-id:17.0.6")
+}
+
+файл: AndroidManifest.xml
+код:
+
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <application android:theme="@android:style/Theme.Material.Light.NoActionBar" android:label="ПереводчикKivi" android:usesCleartextTraffic="false">
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+        </activity>
+        <service android:name=".OverlayService" android:exported="false"/>
+    </application>
+</manifest>
+
+файл: MainActivity.kt
+код:
+
+package com.animekivi.livetranslate
+
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Bundle
+import android.provider.Settings
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.view.Gravity
+import android.widget.*
+import android.graphics.Color
+import com.google.mlkit.nl.translate.*
+import com.google.mlkit.nl.languageid.LanguageIdentification
+import java.util.Locale
+
+class MainActivity : Activity(), TextToSpeech.OnInitListener {
+    private lateinit var status: TextView
+    private lateinit var source: Spinner
+    private var translator: Translator? = null
+    private val languageIdentifier by lazy { LanguageIdentification.getClient() }
+    private lateinit var tts: TextToSpeech
+    private var recognizer: SpeechRecognizer? = null
+    private var listening = false
+    private var voiceEnabled = true
+    private var overlayEnabled = false
+    private val languages = listOf("Автоопределение языка" to "auto") + TranslateLanguage.getAllLanguages().sorted().map { it to it }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        tts = TextToSpeech(this, this)
+        val root = LinearLayout(this).apply { orientation = 1; setPadding(28, 30, 28, 24); setBackgroundColor(Color.rgb(16,20,32)) }
+        fun label(text: String, size: Float) = TextView(this).apply { this.text=text; textSize=size; setTextColor(Color.WHITE); setPadding(0,10,0,10) }
+        root.addView(label("ПереводчикKivi", 28f))
+        root.addView(label("Перевод эфиров на русский", 17f))
+        source = Spinner(this)
+        source.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, languages.map { if (it.first == "Автоопределение языка") it.first else Locale(it.first).getDisplayName(Locale("ru")) })
+        root.addView(source)
+        status = label("Выбери язык и начни перевод.", 16f); root.addView(status)
+        val voice = CheckBox(this).apply { text="Озвучивать перевод по-русски"; isChecked=true; setTextColor(Color.WHITE); setOnCheckedChangeListener { _, checked -> voiceEnabled=checked } }
+        root.addView(voice)
+        val overlay = Button(this).apply { text="Разрешить субтитры поверх TikTok"; setOnClickListener {
+            if (!Settings.canDrawOverlays(this@MainActivity)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:$packageName")))
+            else { overlayEnabled=true; startService(Intent(this@MainActivity, OverlayService::class.java)); status.text="Плавающая плашка включена." }
+        } }
+        root.addView(overlay)
+        val start = Button(this).apply { text="Начать перевод"; setOnClickListener { startTranslation() } }; root.addView(start)
+        val stop = Button(this).apply { text="Остановить перевод"; setOnClickListener { stopTranslation() } }; root.addView(stop)
+        root.addView(label("Для TikTok: включи громкую связь и держи телефон так, чтобы микрофон слышал эфир. Прямой захват внутреннего звука может быть ограничен Android. Плавающие субтитры требуют отдельного разрешения.", 13f))
+        setContentView(ScrollView(this).apply { addView(root) })
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 42)
+    }
+
+    override fun onInit(statusCode: Int) {
+        if (statusCode == TextToSpeech.SUCCESS) {
+            val result = tts.setLanguage(Locale("ru","RU"))
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                runOnUiThread { if (::status.isInitialized) status.text = "Установи русский голос в настройках синтеза речи Android." }
+            }
+        }
+    }
+
+    private fun startTranslation() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 42); return
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            status.text="На устройстве нет службы распознавания речи."; return
+        }
+        val selected = languages[source.selectedItemPosition].second
+        listening = true
+        status.text = if (selected == "auto") "Автоопределение языка: слушаю эфир…" else "Подготавливаю перевод…"
+        if (overlayEnabled && Settings.canDrawOverlays(this)) startService(Intent(this, OverlayService::class.java))
+        listenOnce(selected)
+    }
+
+    private fun listenOnce(selectedLanguage: String) {
+        if (!listening) return
+        recognizer?.destroy()
+        val r = SpeechRecognizer.createSpeechRecognizer(this)
+        recognizer = r
+        r.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) { status.text="Слушаю эфир…"}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onError(error: Int) {
+                r.destroy()
+                if (listening) status.postDelayed({ listenOnce(selectedLanguage) }, 350)
+            }
+            override fun onResults(results: Bundle?) {
+                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                if (text.isNotBlank()) translateRecognizedText(text, selectedLanguage)
+                r.destroy()
+                if (listening) status.postDelayed({ listenOnce(selectedLanguage) }, 350)
+            }
+            override fun onPartialResults(partialResults: Bundle?) {
+                val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                if (!partial.isNullOrBlank()) status.text="Распознаю: $partial"
+            }
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        val locale = if (selectedLanguage == "auto") "und" else Locale(selectedLanguage).toLanguageTag()
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, locale)
+            if (selectedLanguage == "auto" && android.os.Build.VERSION.SDK_INT >= 34) {
+                putExtra("android.speech.extra.ENABLE_LANGUAGE_DETECTION", true)
+                putExtra("android.speech.extra.ENABLE_LANGUAGE_SWITCH", true)
+            }
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+        try { r.startListening(intent) } catch (_: Exception) { if (listening) status.postDelayed({ listenOnce(selectedLanguage) }, 500) }
+    }
+
+    private fun translateRecognizedText(text: String, selectedLanguage: String) {
+        val useDetectedLanguage = selectedLanguage == "auto"
+        val sourceCodeTask = if (useDetectedLanguage) {
+            languageIdentifier.identifyLanguage(text).continueWith { task -> task.result ?: "und" }
+        } else {
+            com.google.android.gms.tasks.Tasks.forResult(selectedLanguage)
+        }
+        sourceCodeTask.addOnSuccessListener { languageCode ->
+            val sourceCode = if (useDetectedLanguage) TranslateLanguage.fromLanguageTag(languageCode) else languageCode
+            if (sourceCode == null || sourceCode == TranslateLanguage.RUSSIAN) {
+                runOnUiThread { status.text = if (sourceCode == TranslateLanguage.RUSSIAN) "Речь уже на русском: $text" else "Не удалось определить язык. Продолжаю слушать…" }
+                return@addOnSuccessListener
+            }
+            val activeTranslator = translator
+            if (activeTranslator != null && activeTranslatorSource == sourceCode) {
+                performTranslation(activeTranslator, text)
+            } else {
+                activeTranslator?.close()
+                activeTranslatorSource = sourceCode
+                val newTranslator = Translation.getClient(TranslatorOptions.Builder()
+                    .setSourceLanguage(sourceCode)
+                    .setTargetLanguage(TranslateLanguage.RUSSIAN)
+                    .build())
+                translator = newTranslator
+                runOnUiThread { status.text = "Загружаю языковую модель: $languageCode…" }
+                newTranslator.downloadModelIfNeeded()
+                    .addOnSuccessListener { if (listening) performTranslation(newTranslator, text) }
+                    .addOnFailureListener { runOnUiThread { status.text = "Язык $languageCode не поддерживается или модель не загрузилась. Проверь интернет." } }
+            }
+        }.addOnFailureListener {
+            runOnUiThread { status.text = "Не удалось определить язык речи." }
+        }
+    }
+
+    private var activeTranslatorSource: String? = null
+
+    private fun performTranslation(activeTranslator: Translator, text: String) {
+        activeTranslator.translate(text).addOnSuccessListener { translated ->
+            runOnUiThread {
+                status.text = "Оригинал: $text\n\nРусский перевод: $translated"
+                if (overlayEnabled && Settings.canDrawOverlays(this@MainActivity)) {
+                    startService(Intent(this@MainActivity, OverlayService::class.java).putExtra("caption", translated))
+                }
+                if (voiceEnabled) tts.speak(translated, TextToSpeech.QUEUE_ADD, null, "translation")
+            }
+        }.addOnFailureListener {
+            runOnUiThread { status.text = "Не удалось перевести фразу. Продолжаю слушать…" }
+        }
+    }
+
+    private fun stopTranslation() {
+        listening = false
+        recognizer?.cancel()
+        recognizer?.destroy()
+        recognizer = null
+        translator?.close()
+        translator = null
+        stopService(Intent(this, OverlayService::class.java))
+        status.text="Перевод остановлен."
+    }
+
+    override fun onDestroy() {
+        stopTranslation()
+        if (::tts.isInitialized) tts.shutdown()
+        languageIdentifier.close()
+        super.onDestroy()
+    }
+}
+
+файл: OverlayService.kt
+код:
+
+package com.animekivi.livetranslate
+
+import android.app.Service
+import android.content.Intent
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.os.Build
+import android.os.IBinder
+import android.view.Gravity
+import android.view.WindowManager
+import android.widget.TextView
+
+class OverlayService : Service() {
+    private lateinit var wm: WindowManager
+    private var caption: TextView? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        caption = TextView(this).apply {
+            text = "ПереводчикKivi готов к переводу"
+            setTextColor(Color.WHITE)
+            textSize = 17f
+            setPadding(24, 16, 24, 16)
+            setBackgroundColor(0xDD111827.toInt())
+            gravity = Gravity.CENTER
+        }
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else WindowManager.LayoutParams.TYPE_PHONE
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = 100 }
+        try { wm.addView(caption, params) } catch (_: Exception) {}
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        intent?.getStringExtra("caption")?.let { updateCaption(it) }
+        return START_NOT_STICKY
+    }
+
+    private fun updateCaption(text: String) {
+        caption?.post { caption?.text = text }
+    }
+
+    override fun onDestroy() {
+        try { caption?.let { wm.removeView(it) } } catch (_: Exception) {}
+        caption = null
+        super.onDestroy()
+    }
+    override fun onBind(intent: Intent?): IBinder? = null
+}
