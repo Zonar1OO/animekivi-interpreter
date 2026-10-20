@@ -40,7 +40,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -49,6 +48,7 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
+import kotlin.coroutines.coroutineContext
 
 class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
 
@@ -207,9 +207,7 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
         val silenceThreshold = 500
         val minAudioSize = 16000
 
-        while (listening) {
-            ensureActive()
-
+        while (coroutineContext.isActive && listening) {
             val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
             if (read > 0) {
                 audioBuffer.write(buffer, 0, read)
