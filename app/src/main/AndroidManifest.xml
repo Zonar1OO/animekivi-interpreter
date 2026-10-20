@@ -1,34 +1,55 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Разрешения для записи звука с микрофона -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Интернет для загрузки языковых моделей и Google Cloud Speech-to-Text -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Разрешение на субтитры поверх других приложений -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Разрешения для фоновых сервисов -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!-- Уведомления для фонового сервиса (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Держать процесс активным во время перевода -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Захват внутреннего звука (нужно для MediaProjection на некоторых устройствах) -->
+    <uses-permission
+        android:name="android.permission.CAPTURE_AUDIO_OUTPUT"
+        tools:ignore="ProtectedPermissions" />
 
     <application
         android:allowBackup="true"
         android:label="ПереводчикKivi"
+        android:icon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
-        android:usesCleartextTraffic="false"
-        android:icon="@mipmap/ic_launcher">
+        android:usesCleartextTraffic="false">
 
+        <!-- Главный экран приложения -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
+        <!-- Фоновый сервис живого перевода -->
         <service
             android:name=".LiveTranslateService"
             android:exported="false"
             android:foregroundServiceType="microphone|mediaProjection" />
+
     </application>
 </manifest>
