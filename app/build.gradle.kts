@@ -11,8 +11,8 @@ android {
         applicationId = "com.animekivi.livetranslate"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.5"
+        versionCode = 4
+        versionName = "0.6"
     }
 
     buildTypes {
@@ -38,4 +38,5 @@ android {
 dependencies {
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:language-id:17.0.6")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 }
