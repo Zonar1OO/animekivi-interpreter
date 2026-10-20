@@ -40,10 +40,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -201,12 +202,14 @@ class LiveTranslateService : Service(), TextToSpeech.OnInitListener {
 
     private suspend fun captureAndRecognize() {
         val buffer = ByteArray(4096)
-        val audioBuffer = java.io.ByteArrayOutputStream()
+        val audioBuffer = ByteArrayOutputStream()
         var silenceCount = 0
         val silenceThreshold = 500
         val minAudioSize = 16000
 
-        while (isActive && listening) {
+        while (listening) {
+            ensureActive()
+
             val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
             if (read > 0) {
                 audioBuffer.write(buffer, 0, read)
